@@ -1,0 +1,53 @@
+{
+  "name": "webrtc-tree",
+  "version": "1.0.0",
+  "description": "Auto-balancing WebRTC Mesh Tree for live streaming",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "require": "./dist/index.cjs",
+      "import": "./dist/index.mjs",
+      "types": "./dist/index.d.ts"
+    },
+    "./server": {
+      "require": "./dist/server/index.cjs",
+      "import": "./dist/server/index.mjs",
+      "types": "./dist/server/index.d.ts"
+    },
+    "./client": {
+      "require": "./dist/client/index.cjs",
+      "import": "./dist/client/index.mjs",
+      "types": "./dist/client/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build:types": "tsc --emitDeclarationOnly",
+    "build": "tsup && npm run build:types",
+    "test": "jest"
+  },
+  "keywords": [
+    "webrtc",
+    "mesh",
+    "p2p",
+    "live",
+    "streaming",
+    "tree",
+    "auto-balancing"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "peerDependencies": {
+    "peerjs": "^1.5.0"
+  },
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "@types/node": "^26.0.0",
+    "jest": "^30.4.2",
+    "ts-jest": "^29.4.11",
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.3"
+  }
+}
