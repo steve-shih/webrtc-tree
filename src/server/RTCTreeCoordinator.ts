@@ -4,12 +4,15 @@ export interface RTCTreeNode {
   layer: number;
   pingMs?: number;
   bitrateKbps?: number;
+  joinedAt: number;
 }
 
 export interface RoomConfig {
   maxNodesPerLayer: number[]; // e.g. [1, 4, 8, 16, 64]
-  baseDelayMs?: number;       // 基礎延遲
-  layerDelayMs?: number;      // 每一層遞增的延遲
+  baseDelayMs?: number;       
+  layerDelayMs?: number;      
+  autoBalanceStrategy?: 'chronological' | 'quality'; // Default: chronological
+  autoBalanceIntervalMs?: number; 
 }
 
 export interface LayerStats {
@@ -19,30 +22,54 @@ export interface LayerStats {
 }
 
 export class RTCTreeCoordinator {
-  // roomId -> peerId -> Node Data
   private trees: Record<string, Record<string, RTCTreeNode>> = {};
   private configs: Record<string, RoomConfig> = {};
+  private timers: Record<string, any> = {};
 
-  /**
-   * 建立一個新的直播房間拓撲結構
-   * @param roomId 房間 ID
-   * @param streamerPeerId 直播主的 Peer ID
-   * @param config 拓撲設定
-   */
+  // For backend to know who to notify for SYS_RECONNECT
+  public onPeersNeedReconnect?: (roomId: string, peerIds: string[]) => void;
+
   public createRoom(roomId: string, streamerPeerId: string, config: RoomConfig): void {
     this.configs[roomId] = {
       baseDelayMs: 1000,
       layerDelayMs: 300,
+      autoBalanceStrategy: 'chronological',
+      autoBalanceIntervalMs: 10000,
       ...config
     };
+    
     this.trees[roomId] = {};
-    // Streamer is at layer 0
-    this.trees[roomId][streamerPeerId] = { children: [], parent: null, layer: 0, pingMs: 0, bitrateKbps: 0 };
+    this.trees[roomId][streamerPeerId] = { 
+      children: [], 
+      parent: null, 
+      layer: 0, 
+      pingMs: 0, 
+      bitrateKbps: 0,
+      joinedAt: Date.now()
+    };
+
+    if (this.configs[roomId].autoBalanceStrategy === 'quality' && this.configs[roomId].autoBalanceIntervalMs) {
+      this.startAutoBalance(roomId);
+    }
   }
 
-  /**
-   * 新節點加入，透過 BFS 分配最合適的父節點
-   */
+  private startAutoBalance(roomId: string) {
+    if (this.timers[roomId]) clearInterval(this.timers[roomId]);
+    
+    const interval = this.configs[roomId].autoBalanceIntervalMs || 10000;
+    this.timers[roomId] = setInterval(() => {
+      this.evaluateAndBalance(roomId);
+    }, interval);
+  }
+
+  public getAssignedParent(roomId: string, peerId: string): string | null {
+    const tree = this.trees[roomId];
+    if (tree && tree[peerId] && tree[peerId].parent) {
+      return tree[peerId].parent; // Return pre-assigned/promoted parent
+    }
+    return this.joinNode(roomId, peerId); // Fallback to BFS
+  }
+
   public joinNode(roomId: string, newPeerId: string): string | null {
     const tree = this.trees[roomId];
     const config = this.configs[roomId];
@@ -59,7 +86,15 @@ export class RTCTreeCoordinator {
     if (!rootId) return null;
 
     if (tree[newPeerId]) {
-      this.removeNode(roomId, newPeerId);
+      // Clean up previous position cleanly without triggering promotion
+      const oldParent = tree[newPeerId].parent;
+      if (oldParent && tree[oldParent]) {
+         tree[oldParent].children = tree[oldParent].children.filter(id => id !== newPeerId);
+      }
+      for(const child of tree[newPeerId].children) {
+         if(tree[child]) tree[child].parent = null;
+      }
+      delete tree[newPeerId];
     }
 
     const layerCounts: Record<number, number> = {};
@@ -99,7 +134,8 @@ export class RTCTreeCoordinator {
           parent: currentId,
           layer: nextLayer,
           pingMs: 0,
-          bitrateKbps: 0
+          bitrateKbps: 0,
+          joinedAt: Date.now()
         };
         return currentId;
       }
@@ -110,24 +146,66 @@ export class RTCTreeCoordinator {
     return null;
   }
 
-  /**
-   * 節點斷線，將其從樹中移除，並讓其子節點變成孤兒
-   */
   public removeNode(roomId: string, deadPeerId: string): void {
     const tree = this.trees[roomId];
-    if (!tree) return;
+    const config = this.configs[roomId];
+    if (!tree || !config) return;
 
     const deadNode = tree[deadPeerId];
     if (!deadNode) return;
 
-    if (deadNode.parent && tree[deadNode.parent]) {
-      const parentNode = tree[deadNode.parent];
-      parentNode.children = parentNode.children.filter(id => id !== deadPeerId);
+    let promotedChildId: string | null = null;
+
+    if (config.autoBalanceStrategy === 'quality' && deadNode.children.length > 0) {
+      // Mode 2: Quality - Find best child to replace
+      let bestChild = deadNode.children[0];
+      let bestScore = Infinity; 
+      
+      for (const childId of deadNode.children) {
+        const child = tree[childId];
+        if (!child) continue;
+        const score = this.calculateNodeScore(child);
+        if (score < bestScore) {
+          bestScore = score;
+          bestChild = childId;
+        }
+      }
+      promotedChildId = bestChild;
     }
 
-    for (const childId of deadNode.children) {
-      if (tree[childId]) {
-        tree[childId].parent = null;
+    const parentId = deadNode.parent;
+
+    if (promotedChildId) {
+      const promotedNode = tree[promotedChildId];
+      
+      // Update promoted node
+      promotedNode.parent = parentId;
+      promotedNode.layer = deadNode.layer;
+      
+      // Re-link parent to promoted child
+      if (parentId && tree[parentId]) {
+        tree[parentId].children = tree[parentId].children.filter(id => id !== deadPeerId);
+        tree[parentId].children.push(promotedChildId);
+      }
+      
+      // Siblings become children of the promoted node
+      const otherChildren = deadNode.children.filter(id => id !== promotedChildId);
+      promotedNode.children.push(...otherChildren);
+      
+      for (const childId of otherChildren) {
+        if (tree[childId]) {
+          tree[childId].parent = promotedChildId;
+        }
+      }
+    } else {
+      // Mode 1: Chronological OR no children - normal disconnect
+      if (parentId && tree[parentId]) {
+        tree[parentId].children = tree[parentId].children.filter(id => id !== deadPeerId);
+      }
+      for (const childId of deadNode.children) {
+        if (tree[childId]) {
+          tree[childId].parent = null; 
+        }
       }
     }
 
@@ -138,9 +216,6 @@ export class RTCTreeCoordinator {
     this.removeNode(roomId, deadPeerId);
   }
 
-  /**
-   * 回報節點的網路速度與延遲
-   */
   public reportStats(roomId: string, peerId: string, ping: number, bitrate: number): void {
     const tree = this.trees[roomId];
     if (tree && tree[peerId]) {
@@ -149,70 +224,82 @@ export class RTCTreeCoordinator {
     }
   }
 
-  /**
-   * 取得某一層的平均網路品質
-   */
-  public getLayerStats(roomId: string, layer: number): LayerStats | null {
+  private calculateNodeScore(node: RTCTreeNode): number {
+    // Lower score is better. Ping matters more, High bitrate lowers score.
+    return (node.pingMs || 50) - ((node.bitrateKbps || 0) / 10);
+  }
+
+  public evaluateAndBalance(roomId: string): void {
     const tree = this.trees[roomId];
-    if (!tree) return null;
+    const config = this.configs[roomId];
+    if (!tree || !config || config.autoBalanceStrategy !== 'quality') return;
 
-    let totalPing = 0;
-    let totalBitrate = 0;
-    let count = 0;
+    // Group nodes by layer
+    const layerGroups: Record<number, string[]> = {};
+    for (const [id, node] of Object.entries(tree)) {
+      if (!layerGroups[node.layer]) layerGroups[node.layer] = [];
+      layerGroups[node.layer].push(id);
+    }
 
-    for (const node of Object.values(tree)) {
-      if (node.layer === layer) {
-        totalPing += (node.pingMs || 0);
-        totalBitrate += (node.bitrateKbps || 0);
-        count++;
+    const layers = Object.keys(layerGroups).map(Number).sort((a, b) => a - b);
+    const swappedPeers: string[] = [];
+
+    // Compare layer N with layer N+1
+    for (let i = 0; i < layers.length - 1; i++) {
+      const currentLayer = layers[i];
+      const nextLayer = layers[i + 1];
+      
+      if (currentLayer === 0) continue; // Skip streamer
+
+      const currentNodes = layerGroups[currentLayer];
+      const nextNodes = layerGroups[nextLayer];
+
+      // Find worst node in current layer
+      let worstCurrentNode = currentNodes[0];
+      let worstScore = -Infinity;
+      for (const id of currentNodes) {
+        const score = this.calculateNodeScore(tree[id]);
+        if (score > worstScore) {
+          worstScore = score;
+          worstCurrentNode = id;
+        }
+      }
+
+      // Find best node in next layer
+      let bestNextNode = nextNodes[0];
+      let bestScore = Infinity;
+      for (const id of nextNodes) {
+        const score = this.calculateNodeScore(tree[id]);
+        if (score < bestScore) {
+          bestScore = score;
+          bestNextNode = id;
+        }
+      }
+
+      // If the node in the lower layer is significantly better than the node in upper layer
+      if (worstScore - bestScore > 20) {
+        const success = this.swapNodes(roomId, worstCurrentNode, bestNextNode);
+        if (success) {
+          swappedPeers.push(worstCurrentNode, bestNextNode);
+        }
       }
     }
 
-    if (count === 0) return { averagePing: 0, averageBitrate: 0, nodeCount: 0 };
-    return {
-      averagePing: totalPing / count,
-      averageBitrate: totalBitrate / count,
-      nodeCount: count
-    };
+    if (swappedPeers.length > 0 && this.onPeersNeedReconnect) {
+      this.onPeersNeedReconnect(roomId, swappedPeers);
+    }
   }
 
-  /**
-   * 計算該節點的預期延遲 (Base Delay + Layer * Layer Delay)
-   */
-  public getNodeExpectedDelay(roomId: string, peerId: string): number {
-    const tree = this.trees[roomId];
-    const config = this.configs[roomId];
-    if (!tree || !config || !tree[peerId]) return 0;
-    
-    const layer = tree[peerId].layer;
-    const base = config.baseDelayMs || 0;
-    const layerDelay = config.layerDelayMs || 0;
-    
-    return base + (layer * layerDelay);
-  }
-
-  /**
-   * 兩點交換 (Swap Nodes)
-   * 用於將網路優良的節點移至上層，或是將不穩定的節點降級。
-   */
   public swapNodes(roomId: string, peerA: string, peerB: string): boolean {
     const tree = this.trees[roomId];
     if (!tree || !tree[peerA] || !tree[peerB]) return false;
-
-    // 不允許交換 Root (Streamer layer 0)
     if (tree[peerA].layer === 0 || tree[peerB].layer === 0) return false;
 
     const nodeA = tree[peerA];
     const nodeB = tree[peerB];
 
-    // 如果是直系血親 (A是B的父或 B是A的父)，直接交換會導致循環參照或邏輯複雜化
-    // 這裡實作簡單版本：只交換同級或非直系節點的位置
-    if (nodeA.parent === peerB || nodeB.parent === peerA) {
-      // 若為直系，因為時間有限，暫時返回 false，實務上可實作父子互換
-      return false; 
-    }
+    if (nodeA.parent === peerB || nodeB.parent === peerA) return false;
 
-    // 1. 交換 parent 指標
     const parentA = nodeA.parent;
     const parentB = nodeB.parent;
 
@@ -226,7 +313,6 @@ export class RTCTreeCoordinator {
     nodeA.parent = parentB;
     nodeB.parent = parentA;
 
-    // 2. 交換 children 指標 (包含將孩子們的 parent 指向新的父親)
     const childrenA = [...nodeA.children];
     const childrenB = [...nodeB.children];
 
@@ -240,7 +326,6 @@ export class RTCTreeCoordinator {
       if (tree[childId]) tree[childId].parent = peerB;
     }
 
-    // 3. 交換 layer
     const layerA = nodeA.layer;
     nodeA.layer = nodeB.layer;
     nodeB.layer = layerA;
@@ -248,16 +333,6 @@ export class RTCTreeCoordinator {
     return true;
   }
 
-  /**
-   * 取得房間目前的樹狀結構扁平紀錄
-   */
-  public getTree(roomId: string): Record<string, RTCTreeNode> | null {
-    return this.trees[roomId] || null;
-  }
-
-  /**
-   * 取得房間嵌套式的樹狀物件 (Nested Object)，方便前端視覺化套件渲染
-   */
   public getTreeObject(roomId: string): any {
     const tree = this.trees[roomId];
     if (!tree) return null;
@@ -288,5 +363,63 @@ export class RTCTreeCoordinator {
     };
 
     return buildNode(rootId);
+  }
+  
+  public getTree(roomId: string): Record<string, RTCTreeNode> | null {
+    return this.trees[roomId] || null;
+  }
+  
+  /**
+   * 取得目前房間的總節點數
+   */
+  public getTotalNodes(roomId: string): number {
+    const tree = this.trees[roomId];
+    if (!tree) return 0;
+    return Object.keys(tree).length;
+  }
+  
+  public getLayerStats(roomId: string, layer: number): LayerStats | null {
+    const tree = this.trees[roomId];
+    if (!tree) return null;
+
+    let totalPing = 0;
+    let totalBitrate = 0;
+    let count = 0;
+
+    for (const node of Object.values(tree)) {
+      if (node.layer === layer) {
+        totalPing += (node.pingMs || 0);
+        totalBitrate += (node.bitrateKbps || 0);
+        count++;
+      }
+    }
+
+    if (count === 0) return { averagePing: 0, averageBitrate: 0, nodeCount: 0 };
+    return {
+      averagePing: totalPing / count,
+      averageBitrate: totalBitrate / count,
+      nodeCount: count
+    };
+  }
+
+  public getNodeExpectedDelay(roomId: string, peerId: string): number {
+    const tree = this.trees[roomId];
+    const config = this.configs[roomId];
+    if (!tree || !config || !tree[peerId]) return 0;
+    
+    const layer = tree[peerId].layer;
+    const base = config.baseDelayMs || 0;
+    const layerDelay = config.layerDelayMs || 0;
+    
+    return base + (layer * layerDelay);
+  }
+  
+  public destroy(roomId: string) {
+    if (this.timers[roomId]) {
+      clearInterval(this.timers[roomId]);
+      delete this.timers[roomId];
+    }
+    delete this.trees[roomId];
+    delete this.configs[roomId];
   }
 }

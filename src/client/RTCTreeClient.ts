@@ -295,6 +295,13 @@ export class RTCTreeClient {
           clearTimeout(timeoutId);
           conn.close();
           this.handleParentDisconnect(targetPeerId);
+        } else if (data && data.type === 'SYS_RECONNECT') {
+          clearTimeout(timeoutId);
+          conn.close();
+          if (this.parentMediaConn) {
+             this.parentMediaConn.close();
+          }
+          this.handleParentDisconnect(targetPeerId);
         } else if (data && data.type === 'USER_DATA') {
           this.handleIncomingData(data.payload);
         }
