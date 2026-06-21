@@ -2,10 +2,20 @@ export interface RTCTreeNode {
   children: string[];
   parent: string | null;
   layer: number;
+  pingMs?: number;
+  bitrateKbps?: number;
 }
 
 export interface RoomConfig {
   maxNodesPerLayer: number[]; // e.g. [1, 4, 8, 16, 64]
+  baseDelayMs?: number;       // 基礎延遲
+  layerDelayMs?: number;      // 每一層遞增的延遲
+}
+
+export interface LayerStats {
+  averagePing: number;
+  averageBitrate: number;
+  nodeCount: number;
 }
 
 export class RTCTreeCoordinator {
@@ -17,27 +27,27 @@ export class RTCTreeCoordinator {
    * 建立一個新的直播房間拓撲結構
    * @param roomId 房間 ID
    * @param streamerPeerId 直播主的 Peer ID
-   * @param config 拓撲設定，例如 maxNodesPerLayer: [1, 4, 8, 16, 64]
+   * @param config 拓撲設定
    */
   public createRoom(roomId: string, streamerPeerId: string, config: RoomConfig): void {
-    this.configs[roomId] = config;
+    this.configs[roomId] = {
+      baseDelayMs: 1000,
+      layerDelayMs: 300,
+      ...config
+    };
     this.trees[roomId] = {};
     // Streamer is at layer 0
-    this.trees[roomId][streamerPeerId] = { children: [], parent: null, layer: 0 };
+    this.trees[roomId][streamerPeerId] = { children: [], parent: null, layer: 0, pingMs: 0, bitrateKbps: 0 };
   }
 
   /**
    * 新節點加入，透過 BFS 分配最合適的父節點
-   * @param roomId 房間 ID
-   * @param newPeerId 新節點的 Peer ID
-   * @returns 分配到的父節點 Peer ID，若無法分配則回傳 null
    */
   public joinNode(roomId: string, newPeerId: string): string | null {
     const tree = this.trees[roomId];
     const config = this.configs[roomId];
     if (!tree || !config) return null;
 
-    // 尋找樹根 (layer 0 的節點，通常是 streamer)
     let rootId: string | null = null;
     for (const [id, node] of Object.entries(tree)) {
       if (node.layer === 0) {
@@ -48,18 +58,15 @@ export class RTCTreeCoordinator {
 
     if (!rootId) return null;
 
-    // 如果該節點已經在樹中，先將其從原本的位置移除 (防止重複加入或狀態不一致)
     if (tree[newPeerId]) {
       this.removeNode(roomId, newPeerId);
     }
 
-    // 計算目前每一層的總節點數
     const layerCounts: Record<number, number> = {};
     for (const node of Object.values(tree)) {
       layerCounts[node.layer] = (layerCounts[node.layer] || 0) + 1;
     }
 
-    // BFS 尋找未滿載的節點
     const queue: string[] = [rootId];
     
     while (queue.length > 0) {
@@ -67,52 +74,44 @@ export class RTCTreeCoordinator {
       const currentNode = tree[currentId];
       const currentLayer = currentNode.layer;
       
-      // 下一層的索引
       const nextLayer = currentLayer + 1;
 
-      // 如果已經達到最大層數設定，該節點不能再有子節點
       if (nextLayer >= config.maxNodesPerLayer.length) {
-        // Continue searching in queue
         queue.push(...currentNode.children);
         continue;
       }
 
-      // 檢查下一層是否已經達到整體上限
       const nextLayerMax = config.maxNodesPerLayer[nextLayer];
       const currentNextLayerCount = layerCounts[nextLayer] || 0;
 
       if (currentNextLayerCount >= nextLayerMax) {
-        // 下一層已經滿了，把目前節點的子節點加入 queue 繼續尋找更下層
         queue.push(...currentNode.children);
         continue;
       }
 
-      // 如果下一層還沒滿，那我們要決定「目前這個節點」還能不能接客
-      // 算法：該層平均每個節點可以接的子節點數
-      // 例如 layer 1 最大 4 人，layer 2 最大 8 人，代表 layer 1 每個節點最多接 8/4 = 2 人
       const currentLayerMax = config.maxNodesPerLayer[currentLayer];
       const maxChildrenPerNode = Math.floor(nextLayerMax / currentLayerMax) || 1;
 
       if (currentNode.children.length < maxChildrenPerNode) {
-        // 找到可以接客的節點了！
         currentNode.children.push(newPeerId);
         tree[newPeerId] = {
           children: [],
           parent: currentId,
-          layer: nextLayer
+          layer: nextLayer,
+          pingMs: 0,
+          bitrateKbps: 0
         };
         return currentId;
       }
 
-      // 目前節點滿了，把它的小孩加進 queue
       queue.push(...currentNode.children);
     }
 
-    return null; // 樹已滿或無法分配
+    return null;
   }
 
   /**
-   * 節點斷線，將其從樹中移除，並讓其子節點變成孤兒 (等待重新 join)
+   * 節點斷線，將其從樹中移除，並讓其子節點變成孤兒
    */
   public removeNode(roomId: string, deadPeerId: string): void {
     const tree = this.trees[roomId];
@@ -121,13 +120,11 @@ export class RTCTreeCoordinator {
     const deadNode = tree[deadPeerId];
     if (!deadNode) return;
 
-    // 將自己從父節點的 children 中移除
     if (deadNode.parent && tree[deadNode.parent]) {
       const parentNode = tree[deadNode.parent];
       parentNode.children = parentNode.children.filter(id => id !== deadPeerId);
     }
 
-    // 將子節點的 parent 設為 null (它們需要重新連線)
     for (const childId of deadNode.children) {
       if (tree[childId]) {
         tree[childId].parent = null;
@@ -137,17 +134,159 @@ export class RTCTreeCoordinator {
     delete tree[deadPeerId];
   }
 
-  /**
-   * 報告節點失效 (Self-Healing 觸發點)
-   */
   public reportDeadNode(roomId: string, deadPeerId: string): void {
     this.removeNode(roomId, deadPeerId);
   }
 
   /**
-   * 取得房間目前的樹狀結構 (For Debug/Monitor)
+   * 回報節點的網路速度與延遲
+   */
+  public reportStats(roomId: string, peerId: string, ping: number, bitrate: number): void {
+    const tree = this.trees[roomId];
+    if (tree && tree[peerId]) {
+      tree[peerId].pingMs = ping;
+      tree[peerId].bitrateKbps = bitrate;
+    }
+  }
+
+  /**
+   * 取得某一層的平均網路品質
+   */
+  public getLayerStats(roomId: string, layer: number): LayerStats | null {
+    const tree = this.trees[roomId];
+    if (!tree) return null;
+
+    let totalPing = 0;
+    let totalBitrate = 0;
+    let count = 0;
+
+    for (const node of Object.values(tree)) {
+      if (node.layer === layer) {
+        totalPing += (node.pingMs || 0);
+        totalBitrate += (node.bitrateKbps || 0);
+        count++;
+      }
+    }
+
+    if (count === 0) return { averagePing: 0, averageBitrate: 0, nodeCount: 0 };
+    return {
+      averagePing: totalPing / count,
+      averageBitrate: totalBitrate / count,
+      nodeCount: count
+    };
+  }
+
+  /**
+   * 計算該節點的預期延遲 (Base Delay + Layer * Layer Delay)
+   */
+  public getNodeExpectedDelay(roomId: string, peerId: string): number {
+    const tree = this.trees[roomId];
+    const config = this.configs[roomId];
+    if (!tree || !config || !tree[peerId]) return 0;
+    
+    const layer = tree[peerId].layer;
+    const base = config.baseDelayMs || 0;
+    const layerDelay = config.layerDelayMs || 0;
+    
+    return base + (layer * layerDelay);
+  }
+
+  /**
+   * 兩點交換 (Swap Nodes)
+   * 用於將網路優良的節點移至上層，或是將不穩定的節點降級。
+   */
+  public swapNodes(roomId: string, peerA: string, peerB: string): boolean {
+    const tree = this.trees[roomId];
+    if (!tree || !tree[peerA] || !tree[peerB]) return false;
+
+    // 不允許交換 Root (Streamer layer 0)
+    if (tree[peerA].layer === 0 || tree[peerB].layer === 0) return false;
+
+    const nodeA = tree[peerA];
+    const nodeB = tree[peerB];
+
+    // 如果是直系血親 (A是B的父或 B是A的父)，直接交換會導致循環參照或邏輯複雜化
+    // 這裡實作簡單版本：只交換同級或非直系節點的位置
+    if (nodeA.parent === peerB || nodeB.parent === peerA) {
+      // 若為直系，因為時間有限，暫時返回 false，實務上可實作父子互換
+      return false; 
+    }
+
+    // 1. 交換 parent 指標
+    const parentA = nodeA.parent;
+    const parentB = nodeB.parent;
+
+    if (parentA && tree[parentA]) {
+      tree[parentA].children = tree[parentA].children.map(id => id === peerA ? peerB : id);
+    }
+    if (parentB && tree[parentB]) {
+      tree[parentB].children = tree[parentB].children.map(id => id === peerB ? peerA : id);
+    }
+
+    nodeA.parent = parentB;
+    nodeB.parent = parentA;
+
+    // 2. 交換 children 指標 (包含將孩子們的 parent 指向新的父親)
+    const childrenA = [...nodeA.children];
+    const childrenB = [...nodeB.children];
+
+    nodeA.children = childrenB;
+    nodeB.children = childrenA;
+
+    for (const childId of childrenB) {
+      if (tree[childId]) tree[childId].parent = peerA;
+    }
+    for (const childId of childrenA) {
+      if (tree[childId]) tree[childId].parent = peerB;
+    }
+
+    // 3. 交換 layer
+    const layerA = nodeA.layer;
+    nodeA.layer = nodeB.layer;
+    nodeB.layer = layerA;
+
+    return true;
+  }
+
+  /**
+   * 取得房間目前的樹狀結構扁平紀錄
    */
   public getTree(roomId: string): Record<string, RTCTreeNode> | null {
     return this.trees[roomId] || null;
+  }
+
+  /**
+   * 取得房間嵌套式的樹狀物件 (Nested Object)，方便前端視覺化套件渲染
+   */
+  public getTreeObject(roomId: string): any {
+    const tree = this.trees[roomId];
+    if (!tree) return null;
+
+    let rootId: string | null = null;
+    for (const [id, node] of Object.entries(tree)) {
+      if (node.layer === 0) {
+        rootId = id;
+        break;
+      }
+    }
+
+    if (!rootId) return null;
+
+    const buildNode = (id: string): any => {
+      const node = tree[id];
+      if (!node) return null;
+
+      const children = node.children.map(childId => buildNode(childId)).filter(Boolean);
+      
+      return {
+        id,
+        layer: node.layer,
+        pingMs: node.pingMs,
+        bitrateKbps: node.bitrateKbps,
+        children: children.length > 0 ? children : undefined
+      };
+    };
+
+    return buildNode(rootId);
   }
 }

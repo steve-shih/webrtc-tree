@@ -1,113 +1,106 @@
-# webrtc-tree
+# rtcTree - WebRTC Mesh 拓撲與狀態管理套件
 
-A lightweight, auto-balancing WebRTC Mesh Tree topology coordinator and client for scalable peer-to-peer live streaming.
+`rtcTree` 是一個強大的 WebRTC 網狀 (Mesh) 拓撲管理與 P2P 直播分發套件。它能夠有效減少直播主 (Streamer) 的上傳頻寬壓力，透過「觀眾轉發給觀眾」的層級拓撲，實現低延遲、高擴展的直播架構。
 
-## Overview
+## 特色功能
 
-In traditional P2P mesh networks, every peer connects to every other peer, causing an $O(N^2)$ bandwidth explosion. 
-`webrtc-tree` solves this by organizing peers into a **Breadth-First Search (BFS) Tree topology**. 
+- **自動分配與層級拓撲 (Auto Topology)**：利用 BFS 演算法自動將新加入的節點分配至負載最輕的區域。
+- **自我修復機制 (Self-Healing)**：當上層節點斷線時，下層節點會自動重新尋找新的父節點，維持網格穩定。
+- **兩點交換 (Node Swapping)**：可隨時將網路品質優良的節點移至上層，或是降級不穩定的節點。
+- **品質回報與監測 (Stats & Monitoring)**：客戶端會定期回報 Ping 與 Bitrate，伺服器可計算每層的平均品質。
+- **階層式延遲管理 (Layer Delay)**：支援設定基礎延遲 (`baseDelayMs`) 與逐層遞增延遲 (`layerDelayMs`)。
+- **物件化樹狀圖輸出 (Nested Tree Object)**：支援匯出完整的嵌套 JSON 物件結構，可直接用於前端拓撲視覺化。
 
-By defining maximum capacities per layer (e.g. `[1, 4, 8, 16, 64]`), the tree ensures that the streamer only sends data to a handful of direct children, who then act as relay nodes to forward the stream to the next layer. 
+## 架構說明
 
-### Features
-- 🌲 **Auto-Balancing**: Viewers are automatically assigned to the shallowest available node to minimize latency.
-- 🔄 **Self-Healing**: If a parent node disconnects, its children automatically report the failure and reconnect to a new branch.
-- 📦 **Dual Ecosystem**: Includes a lightweight Node.js Server coordinator and a browser-ready WebRTC Client.
-- 🦾 **TypeScript Native**: Full type-safety right out of the box.
-
----
-
-## Installation
-
-```bash
-npm install webrtc-tree
-```
+本專案採用 **Domain-Driven Design (DDD)** 的精神拆分為伺服器與客戶端：
+- **`RTCTreeCoordinator` (Server-side)**：負責記憶體中的節點狀態管理、路由分配、拓撲計算與修復決策。
+- **`RTCTreeClient` (Client-side)**：封裝 `peerjs`，負責處理 P2P 連線、影音串流接收與發送、以及定時的網路狀態回報。
 
 ---
 
-## Usage
+## 安裝與使用
 
-### 1. Server-Side (Node.js)
-The server acts as a pure-logic state coordinator. It keeps track of the topology without ever touching the actual video streams.
+### Server-Side (伺服器端)
+
+在後端伺服器 (如 Node.js 或透過 API 橋接) 初始化 Coordinator：
 
 ```typescript
-import { RTCTreeCoordinator } from 'webrtc-tree/server';
+import { RTCTreeCoordinator } from 'rtcTree/server';
 
 const coordinator = new RTCTreeCoordinator();
 
-const ROOM_ID = 'live-room-1';
-const STREAMER_ID = 'streamer-peer-id';
-
-// Configure max nodes per layer:
-// Streamer (Layer 0) connects to max 4 viewers (Layer 1).
-// Layer 1 connects to max 8 viewers (Layer 2).
-const topologyConfig = { maxNodesPerLayer: [1, 4, 8, 16, 64] };
-
-// Initialize room
-coordinator.createRoom(ROOM_ID, STREAMER_ID, topologyConfig);
-
-// When a new viewer joins, get their designated parent ID
-const viewerId = 'viewer-peer-123';
-const assignedParentId = coordinator.joinNode(ROOM_ID, viewerId);
-
-// If a viewer disconnects, report it to self-heal the tree
-coordinator.reportDeadNode(ROOM_ID, viewerId);
-```
-
-### 2. Client-Side (Browser)
-The client wraps `PeerJS` to handle the actual WebRTC media transmission.
-
-#### For the Streamer
-```typescript
-import { RTCTreeClient } from 'webrtc-tree/client';
-
-const client = new RTCTreeClient({
-  onStatusChange: (status) => console.log(status),
-  onError: (err) => console.error(err)
+// 1. 建立房間 (直播主加入)
+coordinator.createRoom('room_123', 'streamer_peer_id', {
+  maxNodesPerLayer: [1, 4, 16, 64], // 第一層 4 人，第二層 16 人...
+  baseDelayMs: 1000,
+  layerDelayMs: 300
 });
 
-// Assuming you have the local camera stream
-const myStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+// 2. 觀眾加入，分配父節點
+const parentPeerId = coordinator.joinNode('room_123', 'viewer_peer_id_1');
+console.log(`分配給觀眾的父節點是: ${parentPeerId}`);
 
-// Initialize as the root streamer (Layer 0)
-// Max direct children = 4
-const streamerPeerId = await client.initStreamer(myStream, 4);
-console.log("Streamer is live with Peer ID:", streamerPeerId);
+// 3. 取得目前拓撲圖
+const treeObj = coordinator.getTreeObject('room_123');
+console.dir(treeObj, { depth: null });
 ```
 
-#### For the Viewer
+### Client-Side (瀏覽器端)
+
+在前端網頁中載入 Client，並實作與伺服器溝通的 API 函數：
+
 ```typescript
-import { RTCTreeClient } from 'webrtc-tree/client';
+import { RTCTreeClient } from 'rtcTree/client';
 
 const client = new RTCTreeClient({
-  // Function to ask your Node.js backend for a parent node
+  // 向伺服器請求一個父節點來連線
   fetchParentIdFn: async () => {
-    const res = await fetch('/api/get-parent');
-    const data = await res.json();
-    return data.parentId;
+    const res = await fetch('/api/live/join', { method: 'POST', body: JSON.stringify({ peerId: myPeerId }) });
+    return (await res.json()).parentPeerId;
   },
-  // Function to report a dead node to your backend
-  reportDeadFn: async (deadId) => {
-    await fetch('/api/report-dead', { method: 'POST', body: JSON.stringify({ deadId }) });
+  // 回報上層節點斷線
+  reportDeadFn: async (deadPeerId) => {
+    await fetch('/api/live/report_dead', { method: 'POST', body: JSON.stringify({ deadPeerId }) });
   },
-  // Fired when the stream is successfully received or re-connected
+  // 回報網路狀態 (Ping, Bitrate)
+  reportStatsFn: async (pingMs, bitrateKbps) => {
+    await fetch('/api/live/report_stats', { method: 'POST', body: JSON.stringify({ pingMs, bitrateKbps }) });
+  },
+  // 當接收到影像串流
   onStreamReceived: (stream) => {
-    const videoElement = document.getElementById('remoteVideo');
+    const videoElement = document.getElementById('live-video') as HTMLVideoElement;
     videoElement.srcObject = stream;
-    videoElement.play();
   },
-  onStatusChange: (status) => console.log("Status:", status)
+  // 狀態改變時的提示
+  onStatusChange: (status) => console.log('狀態:', status),
+  // 伺服器期望的延遲時間 (由客戶端決定如何套用，如 video.currentTime)
+  onDelayConfigured: (expectedDelayMs) => {
+    console.log(`目前這層的預期延遲是: ${expectedDelayMs} ms`);
+  }
 });
 
-// Initialize as a viewer relay node
-// Max relay children = 2 (Depends on your layer config)
-await client.initViewer(2);
+// 如果是直播主：
+await client.initStreamer(localCameraStream, 4);
+
+// 如果是觀眾：
+await client.initViewer(4);
 ```
 
----
+## 進階 API 參考
 
-## Architecture Pattern (Microservice)
-For the best scalability, it is highly recommended to deploy the `webrtc-tree/server` logic as a standalone Node.js microservice (e.g., using WebSockets or REST). Your main backend (Python, Go, etc.) can focus on business logic while this service purely orchestrates WebRTC routing.
+### `swapNodes(roomId, peerA, peerB)`
+強制交換兩個非直系節點的位置，適用於管理員介入優化網路架構：
+```typescript
+const success = coordinator.swapNodes('room_123', 'peer_user_A', 'peer_user_B');
+```
 
-## License
-ISC
+### `getLayerStats(roomId, layer)`
+取得特定層級目前的平均網路品質：
+```typescript
+const stats = coordinator.getLayerStats('room_123', 1);
+console.log(`第一層平均 Ping: ${stats.averagePing}ms, 平均流量: ${stats.averageBitrate}Kbps`);
+```
+
+## 授權
+MIT License

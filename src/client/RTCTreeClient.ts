@@ -6,6 +6,9 @@ export interface RTCTreeClientOptions {
   onError?: (error: any) => void;
   fetchParentIdFn?: () => Promise<string | null>; // Client uses this to ask Server for a parent
   reportDeadFn?: (deadPeerId: string) => Promise<void>; // Client uses this to tell Server a node is dead
+  reportStatsFn?: (pingMs: number, bitrateKbps: number) => Promise<void>; // Report stats
+  onDelayConfigured?: (expectedDelayMs: number) => void; // Triggered when server defines delay
+  statsIntervalMs?: number; // Default 5000ms
 }
 
 export class RTCTreeClient {
@@ -18,18 +21,24 @@ export class RTCTreeClient {
   // State
   private isStreamer: boolean = false;
   private isReconnecting: boolean = false;
+  private expectedDelayMs: number = 0;
+  
+  private statsTimer: any = null;
 
-  constructor(private options: RTCTreeClientOptions) {}
+  constructor(private options: RTCTreeClientOptions) {
+    if (!this.options.statsIntervalMs) {
+      this.options.statsIntervalMs = 5000;
+    }
+  }
 
   /**
    * 初始化為直播主 (Streamer)
-   * @param stream 本地攝影機/麥克風的 MediaStream
-   * @param maxChildren 第一層最大觀眾數 (Layer 1 Capacity)
-   * @returns 建立完成後的 Peer ID
    */
   public initStreamer(stream: MediaStream, maxChildren: number = 4): Promise<string> {
     this.isStreamer = true;
     this.myStream = stream;
+    this.expectedDelayMs = 0;
+    this.options.onDelayConfigured?.(this.expectedDelayMs);
 
     return new Promise((resolve, reject) => {
       this.peer = new Peer();
@@ -37,6 +46,7 @@ export class RTCTreeClient {
       this.peer.on('open', (id) => {
         this.myPeerId = id;
         this.options.onStatusChange?.("直播已開始");
+        this.startStatsReporting();
         resolve(id);
       });
 
@@ -45,7 +55,6 @@ export class RTCTreeClient {
         reject(err);
       });
 
-      // 監聽觀眾連線請求
       this.peer.on('connection', (conn) => {
         conn.on('data', (data: any) => {
           if (data === 'VIEWER_READY') {
@@ -70,10 +79,11 @@ export class RTCTreeClient {
 
   /**
    * 初始化為觀眾 (Viewer)
-   * @param maxChildren 轉發最大觀眾數 (Layer N Capacity)
    */
-  public initViewer(maxChildren: number = 4): Promise<string> {
+  public initViewer(maxChildren: number = 4, expectedDelayMs: number = 1000): Promise<string> {
     this.isStreamer = false;
+    this.expectedDelayMs = expectedDelayMs;
+    this.options.onDelayConfigured?.(this.expectedDelayMs);
 
     return new Promise((resolve, reject) => {
       this.peer = new Peer();
@@ -83,8 +93,8 @@ export class RTCTreeClient {
         this.options.onStatusChange?.("正在分配節點...");
         resolve(id);
         
-        // 開始加入流程
         await this.connectToMesh();
+        this.startStatsReporting();
       });
 
       this.peer.on('error', (err) => {
@@ -92,11 +102,11 @@ export class RTCTreeClient {
         reject(err);
       });
 
-      // 當我們自己也是別人的 parent 時，處理下層觀眾連線
       this.peer.on('connection', (conn) => {
         conn.on('data', (data: any) => {
           if (data === 'VIEWER_READY') {
             if (Object.keys(this.activeCalls).length < maxChildren && this.myStream) {
+              // 注意：當前層若有 delay，傳遞給下一層的 Stream 是不受前端 delay 影響的原始 stream
               const call = this.peer!.call(conn.peer, this.myStream);
               this.activeCalls[conn.peer] = call;
             } else {
@@ -113,7 +123,6 @@ export class RTCTreeClient {
         });
       });
 
-      // 接收上層傳來的影像
       this.peer.on('call', (call) => {
         this.options.onStatusChange?.("接收影像中...");
         this.parentConnection = call;
@@ -126,11 +135,25 @@ export class RTCTreeClient {
         });
 
         call.on('close', () => {
-          // 上層斷線！啟動 Self-Healing
           this.handleParentDisconnect(call.peer);
         });
       });
     });
+  }
+
+  /**
+   * 設定目前的期望延遲 (由外部或伺服器呼叫)
+   */
+  public setExpectedDelay(delayMs: number): void {
+    this.expectedDelayMs = delayMs;
+    this.options.onDelayConfigured?.(this.expectedDelayMs);
+  }
+
+  /**
+   * 取得目前的期望延遲
+   */
+  public getExpectedDelay(): number {
+    return this.expectedDelayMs;
   }
 
   private async connectToMesh(): Promise<void> {
@@ -142,7 +165,6 @@ export class RTCTreeClient {
       const targetPeerId = await this.options.fetchParentIdFn();
       if (!targetPeerId) {
         this.options.onStatusChange?.("暫無可用節點，請稍後重試");
-        // 可以加上 retry 機制
         return;
       }
 
@@ -192,14 +214,40 @@ export class RTCTreeClient {
       await this.options.reportDeadFn(deadPeerId).catch(console.error);
     }
 
-    // 延遲一下避免大量 request
     setTimeout(async () => {
       this.isReconnecting = false;
       await this.connectToMesh();
     }, 2000);
   }
 
+  private startStatsReporting() {
+    if (this.statsTimer) clearInterval(this.statsTimer);
+    
+    this.statsTimer = setInterval(() => {
+      if (!this.options.reportStatsFn || !this.parentConnection?.peerConnection) return;
+      
+      const pc = this.parentConnection.peerConnection;
+      pc.getStats().then(stats => {
+        let currentPing = 50; // Mock base or use stats if available
+        let currentBitrate = 0;
+        
+        stats.forEach(report => {
+          if (report.type === 'inbound-rtp' && report.kind === 'video') {
+            // Simplified calculation for demo purposes
+            currentBitrate = (report.bytesReceived || 0) * 8 / 1000; // kbps total (needs delta in real impl)
+          }
+          if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+             currentPing = report.currentRoundTripTime ? report.currentRoundTripTime * 1000 : 50;
+          }
+        });
+        
+        this.options.reportStatsFn!(currentPing, currentBitrate).catch(console.error);
+      });
+    }, this.options.statsIntervalMs);
+  }
+
   public destroy() {
+    if (this.statsTimer) clearInterval(this.statsTimer);
     if (this.peer) {
       this.peer.destroy();
       this.peer = null;

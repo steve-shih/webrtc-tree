@@ -19,12 +19,8 @@ describe('RTCTreeCoordinator', () => {
   });
 
   test('should distribute viewers according to maxNodesPerLayer [1, 4, 8]', () => {
-    // 1 Streamer
-    // Layer 1: Max 4
-    // Layer 2: Max 8 (each Layer 1 node handles 2 children)
     coordinator.createRoom(roomId, streamerId, { maxNodesPerLayer: [1, 4, 8] });
 
-    // Join 4 viewers
     for (let i = 1; i <= 4; i++) {
       const parent = coordinator.joinNode(roomId, `peer-v${i}`);
       expect(parent).toBe(streamerId);
@@ -33,17 +29,14 @@ describe('RTCTreeCoordinator', () => {
     const tree = coordinator.getTree(roomId);
     expect(tree![streamerId].children.length).toBe(4);
 
-    // Join 5th viewer, should go to layer 2
     const parent5 = coordinator.joinNode(roomId, `peer-v5`);
     expect(parent5).not.toBe(streamerId);
     expect(['peer-v1', 'peer-v2', 'peer-v3', 'peer-v4']).toContain(parent5);
 
-    // Join up to 12 total viewers (4 in L1, 8 in L2)
     for (let i = 6; i <= 12; i++) {
       coordinator.joinNode(roomId, `peer-v${i}`);
     }
 
-    // Now L1 has 4 nodes, L2 has 8 nodes. Total 13 nodes (including streamer)
     const treeState = coordinator.getTree(roomId)!;
     let l1Count = 0;
     let l2Count = 0;
@@ -54,7 +47,6 @@ describe('RTCTreeCoordinator', () => {
     expect(l1Count).toBe(4);
     expect(l2Count).toBe(8);
 
-    // Join 13th viewer. Tree should be FULL because config only specifies up to L2 (maxNodesPerLayer length is 3)
     const parent13 = coordinator.joinNode(roomId, 'peer-v13');
     expect(parent13).toBeNull();
   });
@@ -67,17 +59,46 @@ describe('RTCTreeCoordinator', () => {
     let tree = coordinator.getTree(roomId)!;
     expect(tree[streamerId].children).toEqual(['peer-v1', 'peer-v2']);
 
-    // Remove v1
     coordinator.reportDeadNode(roomId, 'peer-v1');
     tree = coordinator.getTree(roomId)!;
 
     expect(tree['peer-v1']).toBeUndefined();
     expect(tree[streamerId].children).toEqual(['peer-v2']);
 
-    // Re-join v1 (simulate reconnection)
     const parent = coordinator.joinNode(roomId, 'peer-v1');
     expect(parent).toBe(streamerId);
     tree = coordinator.getTree(roomId)!;
     expect(tree[streamerId].children).toEqual(['peer-v2', 'peer-v1']);
+  });
+
+  test('should swap non-direct nodes successfully', () => {
+    coordinator.createRoom(roomId, streamerId, { maxNodesPerLayer: [1, 2, 4] });
+    coordinator.joinNode(roomId, 'peer-v1'); // Layer 1
+    coordinator.joinNode(roomId, 'peer-v2'); // Layer 1
+    coordinator.joinNode(roomId, 'peer-v3'); // Layer 2 (child of v1)
+
+    const result = coordinator.swapNodes(roomId, 'peer-v2', 'peer-v3');
+    expect(result).toBe(true);
+
+    const tree = coordinator.getTree(roomId)!;
+    // v3 應該變成 layer 1 (child of streamer)
+    expect(tree['peer-v3'].layer).toBe(1);
+    expect(tree['peer-v3'].parent).toBe(streamerId);
+    // v2 應該變成 layer 2 (child of v1)
+    expect(tree['peer-v2'].layer).toBe(2);
+    expect(tree['peer-v2'].parent).toBe('peer-v1');
+  });
+
+  test('should return proper nested tree object', () => {
+    coordinator.createRoom(roomId, streamerId, { maxNodesPerLayer: [1, 2] });
+    coordinator.joinNode(roomId, 'peer-v1');
+    coordinator.reportStats(roomId, 'peer-v1', 10, 500);
+
+    const obj = coordinator.getTreeObject(roomId);
+    expect(obj.id).toBe(streamerId);
+    expect(obj.children.length).toBe(1);
+    expect(obj.children[0].id).toBe('peer-v1');
+    expect(obj.children[0].pingMs).toBe(10);
+    expect(obj.children[0].bitrateKbps).toBe(500);
   });
 });
