@@ -1,6 +1,6 @@
 {
   "name": "webrtc-tree",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Auto-balancing WebRTC Mesh Tree for live streaming",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",
