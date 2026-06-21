@@ -1,22 +1,43 @@
-import Peer, { MediaConnection } from 'peerjs';
+import Peer, { MediaConnection, DataConnection } from 'peerjs';
 
 export interface RTCTreeClientOptions {
+  // Backward compatibility
   onStreamReceived?: (stream: MediaStream) => void;
+  
+  // Pipeline - Local Render (Incoming)
+  onStreamReady?: (stream: MediaStream) => void;
+  onIncomingVideo?: (track: MediaStreamTrack) => MediaStreamTrack | void;
+  onIncomingAudio?: (track: MediaStreamTrack) => MediaStreamTrack | void;
+  onIncomingData?: (data: any) => void;
+
+  // Pipeline - Forwarding (Outgoing)
+  onOutgoingVideo?: (track: MediaStreamTrack) => MediaStreamTrack | void;
+  onOutgoingAudio?: (track: MediaStreamTrack) => MediaStreamTrack | void;
+  onOutgoingData?: (data: any) => any | void; // If it returns null/undefined, it filters the data
+
+  // Infrastructure Hooks
   onStatusChange?: (status: string) => void;
   onError?: (error: any) => void;
-  fetchParentIdFn?: () => Promise<string | null>; // Client uses this to ask Server for a parent
-  reportDeadFn?: (deadPeerId: string) => Promise<void>; // Client uses this to tell Server a node is dead
-  reportStatsFn?: (pingMs: number, bitrateKbps: number) => Promise<void>; // Report stats
-  onDelayConfigured?: (expectedDelayMs: number) => void; // Triggered when server defines delay
-  statsIntervalMs?: number; // Default 5000ms
+  fetchParentIdFn?: () => Promise<string | null>;
+  reportDeadFn?: (deadPeerId: string) => Promise<void>;
+  reportStatsFn?: (pingMs: number, bitrateKbps: number) => Promise<void>;
+  onDelayConfigured?: (expectedDelayMs: number) => void;
+  statsIntervalMs?: number;
 }
 
 export class RTCTreeClient {
   private peer: Peer | null = null;
   private myPeerId: string | null = null;
-  private myStream: MediaStream | null = null;
-  private activeCalls: Record<string, MediaConnection> = {};
-  private parentConnection: MediaConnection | null = null;
+  
+  // Pipeline Streams
+  private myRenderStream: MediaStream | null = null;
+  private myOutgoingStream: MediaStream | null = null;
+  
+  // Connections
+  private activeMediaCalls: Record<string, MediaConnection> = {};
+  private activeDataConns: Record<string, DataConnection> = {};
+  private parentMediaConn: MediaConnection | null = null;
+  private parentDataConn: DataConnection | null = null;
   
   // State
   private isStreamer: boolean = false;
@@ -32,11 +53,64 @@ export class RTCTreeClient {
   }
 
   /**
+   * Pipeline Processor
+   */
+  private processStream(rawStream: MediaStream, isLocalStreamer: boolean) {
+    let renderVideoTrack = rawStream.getVideoTracks()[0];
+    let renderAudioTrack = rawStream.getAudioTracks()[0];
+    let outgoingVideoTrack = renderVideoTrack;
+    let outgoingAudioTrack = renderAudioTrack;
+
+    if (isLocalStreamer) {
+      if (this.options.onOutgoingVideo && renderVideoTrack) {
+        outgoingVideoTrack = this.options.onOutgoingVideo(renderVideoTrack) || renderVideoTrack;
+      }
+      if (this.options.onOutgoingAudio && renderAudioTrack) {
+        outgoingAudioTrack = this.options.onOutgoingAudio(renderAudioTrack) || renderAudioTrack;
+      }
+      
+      const outTracks = [outgoingVideoTrack, outgoingAudioTrack].filter(Boolean) as MediaStreamTrack[];
+      this.myOutgoingStream = new MediaStream(outTracks);
+      this.myRenderStream = this.myOutgoingStream; // Streamer usually previews what they send
+    } else {
+      // Incoming Pipeline (Local View)
+      if (this.options.onIncomingVideo && renderVideoTrack) {
+        renderVideoTrack = this.options.onIncomingVideo(renderVideoTrack) || renderVideoTrack;
+      }
+      if (this.options.onIncomingAudio && renderAudioTrack) {
+        renderAudioTrack = this.options.onIncomingAudio(renderAudioTrack) || renderAudioTrack;
+      }
+      const renderTracks = [renderVideoTrack, renderAudioTrack].filter(Boolean) as MediaStreamTrack[];
+      this.myRenderStream = new MediaStream(renderTracks);
+      
+      // Outgoing Pipeline (Forwarding)
+      outgoingVideoTrack = rawStream.getVideoTracks()[0];
+      outgoingAudioTrack = rawStream.getAudioTracks()[0];
+      
+      if (this.options.onOutgoingVideo && outgoingVideoTrack) {
+        outgoingVideoTrack = this.options.onOutgoingVideo(outgoingVideoTrack) || outgoingVideoTrack;
+      }
+      if (this.options.onOutgoingAudio && outgoingAudioTrack) {
+        outgoingAudioTrack = this.options.onOutgoingAudio(outgoingAudioTrack) || outgoingAudioTrack;
+      }
+      const outTracks = [outgoingVideoTrack, outgoingAudioTrack].filter(Boolean) as MediaStreamTrack[];
+      this.myOutgoingStream = new MediaStream(outTracks);
+    }
+    
+    if (this.options.onStreamReady && this.myRenderStream) {
+      this.options.onStreamReady(this.myRenderStream);
+    } else if (this.options.onStreamReceived && this.myRenderStream) {
+      this.options.onStreamReceived(this.myRenderStream);
+    }
+  }
+
+  /**
    * 初始化為直播主 (Streamer)
    */
   public initStreamer(stream: MediaStream, maxChildren: number = 4): Promise<string> {
     this.isStreamer = true;
-    this.myStream = stream;
+    this.processStream(stream, true);
+    
     this.expectedDelayMs = 0;
     this.options.onDelayConfigured?.(this.expectedDelayMs);
 
@@ -58,20 +132,20 @@ export class RTCTreeClient {
       this.peer.on('connection', (conn) => {
         conn.on('data', (data: any) => {
           if (data === 'VIEWER_READY') {
-            if (Object.keys(this.activeCalls).length < maxChildren) {
-              const call = this.peer!.call(conn.peer, this.myStream!);
-              this.activeCalls[conn.peer] = call;
+            if (Object.keys(this.activeMediaCalls).length < maxChildren) {
+              this.activeDataConns[conn.peer] = conn;
+              const call = this.peer!.call(conn.peer, this.myOutgoingStream!);
+              this.activeMediaCalls[conn.peer] = call;
             } else {
-              conn.send({ type: 'REJECT_FULL' });
+              conn.send({ type: 'SYS_REJECT_FULL' });
             }
+          } else if (data && data.type === 'USER_DATA') {
+            this.handleIncomingData(data.payload);
           }
         });
 
         conn.on('close', () => {
-          if (this.activeCalls[conn.peer]) {
-            this.activeCalls[conn.peer].close();
-            delete this.activeCalls[conn.peer];
-          }
+          this.cleanupChild(conn.peer);
         });
       });
     });
@@ -105,33 +179,31 @@ export class RTCTreeClient {
       this.peer.on('connection', (conn) => {
         conn.on('data', (data: any) => {
           if (data === 'VIEWER_READY') {
-            if (Object.keys(this.activeCalls).length < maxChildren && this.myStream) {
-              // 注意：當前層若有 delay，傳遞給下一層的 Stream 是不受前端 delay 影響的原始 stream
-              const call = this.peer!.call(conn.peer, this.myStream);
-              this.activeCalls[conn.peer] = call;
+            if (Object.keys(this.activeMediaCalls).length < maxChildren && this.myOutgoingStream) {
+              this.activeDataConns[conn.peer] = conn;
+              const call = this.peer!.call(conn.peer, this.myOutgoingStream);
+              this.activeMediaCalls[conn.peer] = call;
             } else {
-              conn.send({ type: 'REJECT_FULL' });
+              conn.send({ type: 'SYS_REJECT_FULL' });
             }
+          } else if (data && data.type === 'USER_DATA') {
+            this.handleIncomingData(data.payload);
           }
         });
 
         conn.on('close', () => {
-          if (this.activeCalls[conn.peer]) {
-            this.activeCalls[conn.peer].close();
-            delete this.activeCalls[conn.peer];
-          }
+          this.cleanupChild(conn.peer);
         });
       });
 
       this.peer.on('call', (call) => {
         this.options.onStatusChange?.("接收影像中...");
-        this.parentConnection = call;
+        this.parentMediaConn = call;
         call.answer(); 
         
         call.on('stream', (remoteStream) => {
-          this.myStream = remoteStream;
+          this.processStream(remoteStream, false);
           this.options.onStatusChange?.(""); 
-          this.options.onStreamReceived?.(remoteStream);
         });
 
         call.on('close', () => {
@@ -142,16 +214,52 @@ export class RTCTreeClient {
   }
 
   /**
-   * 設定目前的期望延遲 (由外部或伺服器呼叫)
+   * Data Broadcasting
+   */
+  public broadcastData(payload: any) {
+    let finalPayload = payload;
+    
+    if (this.options.onOutgoingData) {
+      finalPayload = this.options.onOutgoingData(payload);
+    }
+    
+    if (finalPayload === null || finalPayload === undefined) return; // Blocked
+
+    const wrapper = { type: 'USER_DATA', payload: finalPayload };
+    for (const [peerId, conn] of Object.entries(this.activeDataConns)) {
+      conn.send(wrapper);
+    }
+  }
+
+  private handleIncomingData(payload: any) {
+    if (this.options.onIncomingData) {
+      this.options.onIncomingData(payload);
+    }
+    
+    // Viewer should forward to children after incoming processing
+    if (!this.isStreamer) {
+      this.broadcastData(payload);
+    }
+  }
+
+  private cleanupChild(peerId: string) {
+    if (this.activeMediaCalls[peerId]) {
+      this.activeMediaCalls[peerId].close();
+      delete this.activeMediaCalls[peerId];
+    }
+    if (this.activeDataConns[peerId]) {
+      delete this.activeDataConns[peerId];
+    }
+  }
+
+  /**
+   * Network Connections & Reconnections
    */
   public setExpectedDelay(delayMs: number): void {
     this.expectedDelayMs = delayMs;
     this.options.onDelayConfigured?.(this.expectedDelayMs);
   }
 
-  /**
-   * 取得目前的期望延遲
-   */
   public getExpectedDelay(): number {
     return this.expectedDelayMs;
   }
@@ -170,6 +278,7 @@ export class RTCTreeClient {
 
       this.options.onStatusChange?.("連線中...");
       const conn = this.peer!.connect(targetPeerId);
+      this.parentDataConn = conn;
 
       const timeoutId = setTimeout(() => {
         conn.close();
@@ -182,10 +291,12 @@ export class RTCTreeClient {
       });
 
       conn.on('data', (data: any) => {
-        if (data && data.type === 'REJECT_FULL') {
+        if (data && data.type === 'SYS_REJECT_FULL') {
           clearTimeout(timeoutId);
           conn.close();
           this.handleParentDisconnect(targetPeerId);
+        } else if (data && data.type === 'USER_DATA') {
+          this.handleIncomingData(data.payload);
         }
       });
 
@@ -209,6 +320,9 @@ export class RTCTreeClient {
     if (this.isReconnecting) return;
     this.isReconnecting = true;
     this.options.onStatusChange?.("上層節點斷線，重新尋找路徑...");
+    
+    this.parentMediaConn = null;
+    this.parentDataConn = null;
 
     if (this.options.reportDeadFn) {
       await this.options.reportDeadFn(deadPeerId).catch(console.error);
@@ -224,17 +338,16 @@ export class RTCTreeClient {
     if (this.statsTimer) clearInterval(this.statsTimer);
     
     this.statsTimer = setInterval(() => {
-      if (!this.options.reportStatsFn || !this.parentConnection?.peerConnection) return;
+      if (!this.options.reportStatsFn || !this.parentMediaConn?.peerConnection) return;
       
-      const pc = this.parentConnection.peerConnection;
+      const pc = this.parentMediaConn.peerConnection;
       pc.getStats().then(stats => {
-        let currentPing = 50; // Mock base or use stats if available
+        let currentPing = 50; 
         let currentBitrate = 0;
         
         stats.forEach(report => {
           if (report.type === 'inbound-rtp' && report.kind === 'video') {
-            // Simplified calculation for demo purposes
-            currentBitrate = (report.bytesReceived || 0) * 8 / 1000; // kbps total (needs delta in real impl)
+            currentBitrate = (report.bytesReceived || 0) * 8 / 1000; 
           }
           if (report.type === 'candidate-pair' && report.state === 'succeeded') {
              currentPing = report.currentRoundTripTime ? report.currentRoundTripTime * 1000 : 50;
