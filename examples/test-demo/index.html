@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <title>webrtc-tree 測試範例</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; }
+    .container { display: flex; gap: 20px; }
+    .video-box { border: 1px solid #ccc; padding: 10px; width: 400px; }
+    video { width: 100%; background: #000; }
+    .controls { margin-bottom: 20px; }
+  </style>
+</head>
+<body>
+  <h1>webrtc-tree P2P 直播樹測試</h1>
+  <div class="controls">
+    <button id="btnStreamer">建立房間 (當直播主)</button>
+    <button id="btnViewer">加入房間 (當觀眾)</button>
+  </div>
+  <p id="status">狀態：尚未連線</p>
+  <div class="container">
+    <div class="video-box">
+      <h3>畫面</h3>
+      <video id="videoPlayer" autoplay playsinline controls></video>
+    </div>
+  </div>
+
+  <script type="module" src="/main.js"></script>
+</body>
+</html>

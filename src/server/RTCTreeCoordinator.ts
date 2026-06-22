@@ -26,8 +26,10 @@ export class RTCTreeCoordinator {
   private configs: Record<string, RoomConfig> = {};
   private timers: Record<string, any> = {};
 
-  // For backend to know who to notify for SYS_RECONNECT
+  // 讓後端知道哪些節點需要觸發 SYS_RECONNECT
   public onPeersNeedReconnect?: (roomId: string, peerIds: string[]) => void;
+  // 讓後端轉發信令 (Signaling)
+  public onSignalingMessage?: (roomId: string, fromPeerId: string, toPeerId: string, message: any) => void;
 
   public createRoom(roomId: string, streamerPeerId: string, config: RoomConfig): void {
     this.configs[roomId] = {
@@ -65,9 +67,9 @@ export class RTCTreeCoordinator {
   public getAssignedParent(roomId: string, peerId: string): string | null {
     const tree = this.trees[roomId];
     if (tree && tree[peerId] && tree[peerId].parent) {
-      return tree[peerId].parent; // Return pre-assigned/promoted parent
+      return tree[peerId].parent; // 回傳已經分配好的父節點
     }
-    return this.joinNode(roomId, peerId); // Fallback to BFS
+    return this.joinNode(roomId, peerId); // 否則使用廣度優先搜尋 (BFS) 來尋找
   }
 
   public joinNode(roomId: string, newPeerId: string): string | null {
@@ -86,7 +88,7 @@ export class RTCTreeCoordinator {
     if (!rootId) return null;
 
     if (tree[newPeerId]) {
-      // Clean up previous position cleanly without triggering promotion
+      // 清理舊的位置，且不觸發 promotion 機制
       const oldParent = tree[newPeerId].parent;
       if (oldParent && tree[oldParent]) {
          tree[oldParent].children = tree[oldParent].children.filter(id => id !== newPeerId);
@@ -174,7 +176,7 @@ export class RTCTreeCoordinator {
     let promotedChildId: string | null = null;
 
     if (config.autoBalanceStrategy === 'quality' && deadNode.children.length > 0) {
-      // Mode 2: Quality - Find best child to replace
+      // 模式 2: 品質優先 - 尋找最好的子節點來晉升
       let bestChild = deadNode.children[0];
       let bestScore = Infinity; 
       
@@ -195,17 +197,17 @@ export class RTCTreeCoordinator {
     if (promotedChildId) {
       const promotedNode = tree[promotedChildId];
       
-      // Update promoted node
+      // 更新晉升的節點
       promotedNode.parent = parentId;
       promotedNode.layer = deadNode.layer;
       
-      // Re-link parent to promoted child
+      // 將原本的父節點連結到晉升的子節點
       if (parentId && tree[parentId]) {
         tree[parentId].children = tree[parentId].children.filter(id => id !== deadPeerId);
         tree[parentId].children.push(promotedChildId);
       }
       
-      // Siblings become children of the promoted node
+      // 原本的兄弟節點變成晉升節點的子節點
       const otherChildren = deadNode.children.filter(id => id !== promotedChildId);
       promotedNode.children.push(...otherChildren);
       
@@ -217,7 +219,7 @@ export class RTCTreeCoordinator {
       
       this.updateSubtreeLayers(roomId, promotedChildId, deadNode.layer);
     } else {
-      // Mode 1: Chronological OR no children - normal disconnect
+      // 模式 1: 按加入順序 (Chronological) 或沒有子節點 - 正常斷線處理
       if (parentId && tree[parentId]) {
         tree[parentId].children = tree[parentId].children.filter(id => id !== deadPeerId);
       }
@@ -244,7 +246,7 @@ export class RTCTreeCoordinator {
   }
 
   private calculateNodeScore(node: RTCTreeNode): number {
-    // Lower score is better. Ping matters more, High bitrate lowers score.
+    // 分數越低越好。Ping 值佔比重較大，高位元速率可以降低分數。
     return (node.pingMs || 50) - ((node.bitrateKbps || 0) / 10);
   }
 
@@ -253,7 +255,7 @@ export class RTCTreeCoordinator {
     const config = this.configs[roomId];
     if (!tree || !config || config.autoBalanceStrategy !== 'quality') return;
 
-    // Group nodes by layer
+    // 將節點依據層級分組
     const layerGroups: Record<number, string[]> = {};
     for (const [id, node] of Object.entries(tree)) {
       if (!layerGroups[node.layer]) layerGroups[node.layer] = [];
@@ -263,17 +265,17 @@ export class RTCTreeCoordinator {
     const layers = Object.keys(layerGroups).map(Number).sort((a, b) => a - b);
     const swappedPeers: string[] = [];
 
-    // Compare layer N with layer N+1
+    // 比較第 N 層與第 N+1 層
     for (let i = 0; i < layers.length - 1; i++) {
       const currentLayer = layers[i];
       const nextLayer = layers[i + 1];
       
-      if (currentLayer === 0) continue; // Skip streamer
+      if (currentLayer === 0) continue; // 略過直播主
 
       const currentNodes = layerGroups[currentLayer];
       const nextNodes = layerGroups[nextLayer];
 
-      // Find worst node in current layer
+      // 在目前層級尋找最差的節點
       let worstCurrentNode = currentNodes[0];
       let worstScore = -Infinity;
       for (const id of currentNodes) {
@@ -284,7 +286,7 @@ export class RTCTreeCoordinator {
         }
       }
 
-      // Find best node in next layer
+      // 在下一層尋找最好的節點
       let bestNextNode = nextNodes[0];
       let bestScore = Infinity;
       for (const id of nextNodes) {
@@ -295,7 +297,7 @@ export class RTCTreeCoordinator {
         }
       }
 
-      // If the node in the lower layer is significantly better than the node in upper layer
+      // 如果下層的節點表現比上層節點好很多 (超過閥值 20)
       if (worstScore - bestScore > 20) {
         const success = this.swapNodes(roomId, worstCurrentNode, bestNextNode);
         if (success) {
@@ -451,6 +453,19 @@ export class RTCTreeCoordinator {
     delete this.trees[roomId];
     delete this.configs[roomId];
   }
+
+  public handleSignaling(roomId: string, fromPeerId: string, toPeerId: string, message: any): void {
+    const tree = this.trees[roomId];
+    if (!tree) return;
+    
+    // 驗證發送者與接收者是否都在這個房間內
+    if (!tree[fromPeerId] || !tree[toPeerId]) return;
+
+    if (this.onSignalingMessage) {
+      this.onSignalingMessage(roomId, fromPeerId, toPeerId, message);
+    }
+  }
+
 
   public getTreeString(roomId: string): string {
     const tree = this.trees[roomId];
