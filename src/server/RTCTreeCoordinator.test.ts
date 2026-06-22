@@ -101,4 +101,51 @@ describe('RTCTreeCoordinator', () => {
     expect(obj.children[0].pingMs).toBe(10);
     expect(obj.children[0].bitrateKbps).toBe(500);
   });
+
+  test('should swap siblings correctly without corrupting the parent', () => {
+    coordinator.createRoom(roomId, streamerId, { maxNodesPerLayer: [1, 2, 4] });
+    coordinator.joinNode(roomId, 'peer-v1'); // Layer 1, child of streamer
+    coordinator.joinNode(roomId, 'peer-v2'); // Layer 1, child of streamer
+    
+    // Both are siblings. Swap them.
+    const result = coordinator.swapNodes(roomId, 'peer-v1', 'peer-v2');
+    expect(result).toBe(true);
+
+    const tree = coordinator.getTree(roomId)!;
+    // Parent should still have exactly both children, not duplicated
+    expect(tree[streamerId].children).toHaveLength(2);
+    expect(tree[streamerId].children).toContain('peer-v1');
+    expect(tree[streamerId].children).toContain('peer-v2');
+  });
+
+  test('should update layers recursively when a node is promoted', () => {
+    // Quality strategy to trigger promotion logic
+    coordinator.createRoom(roomId, streamerId, { maxNodesPerLayer: [1, 1, 1, 1], autoBalanceStrategy: 'quality' });
+    coordinator.joinNode(roomId, 'peer-v1'); // Layer 1
+    coordinator.joinNode(roomId, 'peer-v2'); // Layer 2, child of v1
+    coordinator.joinNode(roomId, 'peer-v3'); // Layer 3, child of v2
+
+    coordinator.reportDeadNode(roomId, 'peer-v1'); // v1 dies, v2 promoted to layer 1
+
+    const tree = coordinator.getTree(roomId)!;
+    expect(tree['peer-v2'].layer).toBe(1);
+    expect(tree['peer-v2'].parent).toBe(streamerId);
+    
+    // v3 was layer 3, should now be layer 2
+    expect(tree['peer-v3'].layer).toBe(2);
+    expect(tree['peer-v3'].parent).toBe('peer-v2');
+  });
+
+  test('should return proper string representation of the tree', () => {
+    coordinator.createRoom(roomId, streamerId, { maxNodesPerLayer: [1, 2] });
+    coordinator.joinNode(roomId, 'peer-v1');
+    coordinator.joinNode(roomId, 'peer-v2');
+    coordinator.reportStats(roomId, 'peer-v1', 10, 500);
+    coordinator.reportStats(roomId, 'peer-v2', 15, 490);
+
+    const treeStr = coordinator.getTreeString(roomId);
+    expect(treeStr).toContain(streamerId);
+    expect(treeStr).toContain('├── peer-v1 (Ping: 10ms, 500kbps)');
+    expect(treeStr).toContain('└── peer-v2 (Ping: 15ms, 490kbps)');
+  });
 });

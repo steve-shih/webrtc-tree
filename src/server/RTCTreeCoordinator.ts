@@ -146,6 +146,23 @@ export class RTCTreeCoordinator {
     return null;
   }
 
+  private updateSubtreeLayers(roomId: string, rootId: string, layer: number) {
+    const tree = this.trees[roomId];
+    if (!tree || !tree[rootId]) return;
+    const queue = [{ id: rootId, layer }];
+    
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      const node = tree[current.id];
+      if (node) {
+        node.layer = current.layer;
+        for (const childId of node.children) {
+          queue.push({ id: childId, layer: current.layer + 1 });
+        }
+      }
+    }
+  }
+
   public removeNode(roomId: string, deadPeerId: string): void {
     const tree = this.trees[roomId];
     const config = this.configs[roomId];
@@ -197,6 +214,8 @@ export class RTCTreeCoordinator {
           tree[childId].parent = promotedChildId;
         }
       }
+      
+      this.updateSubtreeLayers(roomId, promotedChildId, deadNode.layer);
     } else {
       // Mode 1: Chronological OR no children - normal disconnect
       if (parentId && tree[parentId]) {
@@ -303,11 +322,21 @@ export class RTCTreeCoordinator {
     const parentA = nodeA.parent;
     const parentB = nodeB.parent;
 
-    if (parentA && tree[parentA]) {
-      tree[parentA].children = tree[parentA].children.map(id => id === peerA ? peerB : id);
-    }
-    if (parentB && tree[parentB]) {
-      tree[parentB].children = tree[parentB].children.map(id => id === peerB ? peerA : id);
+    if (parentA === parentB) {
+      if (parentA && tree[parentA]) {
+        tree[parentA].children = tree[parentA].children.map(id => {
+          if (id === peerA) return peerB;
+          if (id === peerB) return peerA;
+          return id;
+        });
+      }
+    } else {
+      if (parentA && tree[parentA]) {
+        tree[parentA].children = tree[parentA].children.map(id => id === peerA ? peerB : id);
+      }
+      if (parentB && tree[parentB]) {
+        tree[parentB].children = tree[parentB].children.map(id => id === peerB ? peerA : id);
+      }
     }
 
     nodeA.parent = parentB;
@@ -421,5 +450,46 @@ export class RTCTreeCoordinator {
     }
     delete this.trees[roomId];
     delete this.configs[roomId];
+  }
+
+  public getTreeString(roomId: string): string {
+    const tree = this.trees[roomId];
+    if (!tree) return "Room not found or empty";
+
+    let rootId: string | null = null;
+    for (const [id, node] of Object.entries(tree)) {
+      if (node.layer === 0) {
+        rootId = id;
+        break;
+      }
+    }
+
+    if (!rootId) return "Root not found";
+
+    let result = "";
+
+    const buildString = (nodeId: string, prefix: string, isLast: boolean, isRoot: boolean) => {
+      const node = tree[nodeId];
+      if (!node) return;
+
+      const pingStr = node.pingMs ? `Ping: ${Math.round(node.pingMs)}ms` : 'Ping: -ms';
+      const bitrateStr = node.bitrateKbps ? `${Math.round(node.bitrateKbps)}kbps` : '-kbps';
+      
+      if (isRoot) {
+        result += `${nodeId}\n`;
+      } else {
+        const marker = isLast ? "└── " : "├── ";
+        result += `${prefix}${marker}${nodeId} (${pingStr}, ${bitrateStr})\n`;
+      }
+
+      const childPrefix = isRoot ? "" : prefix + (isLast ? "    " : "│   ");
+      
+      for (let i = 0; i < node.children.length; i++) {
+        buildString(node.children[i], childPrefix, i === node.children.length - 1, false);
+      }
+    };
+
+    buildString(rootId, "", true, true);
+    return result.trimEnd();
   }
 }
