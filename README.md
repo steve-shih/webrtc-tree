@@ -1,7 +1,7 @@
 <div align="center">
   <img src="https://raw.githubusercontent.com/steve-shih/webrtc-tree/main/assets/logo.png" alt="rtcTree Logo" width="120" onerror="this.style.display='none'"/>
   <h1>🌳 rtcTree</h1>
-  <p><b>Advanced Auto-Balancing WebRTC Mesh Topology Manager</b></p>
+  <p><b>Advanced Auto-Balancing WebRTC Mesh Topology Manager & Distributed AI Framework</b></p>
 
   [![npm version](https://img.shields.io/npm/v/webrtc-tree.svg?style=flat-square)](https://www.npmjs.com/package/webrtc-tree)
   [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](https://opensource.org/licenses/MIT)
@@ -10,21 +10,17 @@
 
 ---
 
-**`webrtc-tree`** is a decentralized, high-performance WebRTC topology management library engineered specifically for **Peer-to-Peer (P2P) Live Streaming** and **Video Broadcasting**. 
+**`webrtc-tree`** is a decentralized, high-performance WebRTC topology management library engineered specifically for **Peer-to-Peer (P2P) Live Streaming**, **Video Broadcasting**, and **Distributed AI Edge Computing**. 
 
 By utilizing an **Auto-Balancing WebRTC Mesh Network**, `webrtc-tree` intelligently offloads the streamer's upload bandwidth by distributing media streams across viewers. It is the perfect solution for building scalable, zero-cost live streaming platforms using Node.js and WebRTC.
 
-## 🌟 Why rtcTree?
-* **Cost-Efficient**: Zero media server bandwidth costs. The server only handles lightweight signaling.
-* **Smart Auto-Balancing**: Periodically evaluates connection quality (Ping/Bitrate) and promotes strong nodes to the top of the tree.
-* **Self-Healing**: If a parent node drops out, the mesh automatically restructures in milliseconds.
-* **Media Pipeline Control**: Decouple and independently process video, audio, and data tracks before local rendering or downstream forwarding.
-
 ---
 
-## 💡 Advanced Use Case: Distributed AI Edge Processing
+## 💡 Highlight: Distributed AI Edge Computing
 
-Because `webrtc-tree` strictly separates **Audio**, **Video**, and **Data** pipelines, you can build an ultra-low-cost, distributed AI processing cluster using weak edge devices or standard browser clients:
+Because `webrtc-tree` strictly separates **Audio**, **Video**, and **Data** pipelines via Media Pipeline Hooks, you can easily build an ultra-low-cost, distributed AI processing cluster using weak edge devices or standard browser clients. 
+
+This architecture allows a few low-end machines to support a highly scalable, self-adaptive AI live streaming system without needing expensive GPU cloud servers.
 
 ```mermaid
 graph TD
@@ -48,7 +44,15 @@ graph TD
     C -->|Combined AV Stream| V2
 ```
 
-By leveraging `rtcTree`'s Media Pipeline Hooks (`onIncomingVideo`, `onIncomingAudio`), you can distribute heavy AI workloads across multiple cheap machines. Node A only processes frames, Node B only processes sound, and Node C stitches them together to serve the final downstream viewers—achieving a **highly scalable, self-adaptive AI live streaming architecture** without needing expensive GPU cloud servers.
+By leveraging `rtcTree`'s Media Pipeline Hooks (`onIncomingVideo`, `onIncomingAudio`), heavy AI workloads are distributed: Node A processes only video frames, Node B processes only sound, and Node C stitches them together to serve the final downstream viewers.
+
+---
+
+## 🌟 Why rtcTree?
+* **Cost-Efficient**: Zero media server bandwidth costs. The server only handles lightweight signaling.
+* **Smart Auto-Balancing**: Periodically evaluates connection quality (Ping/Bitrate) and promotes strong nodes to the top of the tree.
+* **Self-Healing**: If a parent node drops out, the mesh automatically restructures in milliseconds.
+* **Media Pipeline Control**: Decouple and independently process video, audio, and data tracks before local rendering or downstream forwarding.
 
 ---
 
