@@ -22,6 +22,36 @@ By utilizing an **Auto-Balancing WebRTC Mesh Network**, `webrtc-tree` intelligen
 
 ---
 
+## 💡 Advanced Use Case: Distributed AI Edge Processing
+
+Because `webrtc-tree` strictly separates **Audio**, **Video**, and **Data** pipelines, you can build an ultra-low-cost, distributed AI processing cluster using weak edge devices or standard browser clients:
+
+```mermaid
+graph TD
+    classDef source fill:#ff9999,stroke:#cc0000,stroke-width:2px;
+    classDef aivideo fill:#e6ccff,stroke:#9900ff,stroke-width:2px;
+    classDef aiaudio fill:#ffffcc,stroke:#cccc00,stroke-width:2px;
+    classDef merger fill:#ccffcc,stroke:#009933,stroke-width:2px;
+
+    S(🎥 Original Stream):::source
+    A(🖥️ Node A: Video AI Pipeline<br/>e.g. YOLO Object Detection):::aivideo
+    B(🖥️ Node B: Audio AI Pipeline<br/>e.g. Whisper STT / Noise Reduction):::aiaudio
+    C(🚀 Node C: Merger & Broadcaster<br/>Syncs processed Video + Audio):::merger
+    V1(📱 Viewer 1)
+    V2(💻 Viewer 2)
+
+    S -->|Video Only| A
+    S -->|Audio Only| B
+    A -->|Processed Video| C
+    B -->|Processed Audio| C
+    C -->|Combined AV Stream| V1
+    C -->|Combined AV Stream| V2
+```
+
+By leveraging `rtcTree`'s Media Pipeline Hooks (`onIncomingVideo`, `onIncomingAudio`), you can distribute heavy AI workloads across multiple cheap machines. Node A only processes frames, Node B only processes sound, and Node C stitches them together to serve the final downstream viewers—achieving a **highly scalable, self-adaptive AI live streaming architecture** without needing expensive GPU cloud servers.
+
+---
+
 ## 🏗️ Architecture & Topology
 
 `rtcTree` operates on a hybrid architecture that splits the heavy lifting from the coordination:
