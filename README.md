@@ -1,49 +1,81 @@
 <div align="center">
-  <h1>rtcTree</h1>
+  <img src="https://raw.githubusercontent.com/steve-shih/webrtc-tree/main/assets/logo.png" alt="rtcTree Logo" width="120" onerror="this.style.display='none'"/>
+  <h1>🌳 rtcTree</h1>
   <p><b>Advanced Auto-Balancing WebRTC Mesh Topology Manager</b></p>
+
+  [![npm version](https://img.shields.io/npm/v/webrtc-tree.svg?style=flat-square)](https://www.npmjs.com/package/webrtc-tree)
+  [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](https://opensource.org/licenses/MIT)
+  [![TypeScript](https://img.shields.io/badge/TypeScript-Ready-blue.svg?style=flat-square)](https://www.typescriptlang.org/)
 </div>
-
-`rtcTree` is a decentralized WebRTC topology management library engineered for peer-to-peer (P2P) live streaming distribution. It intelligently offloads the streamer's upload bandwidth by distributing media streams across viewers using an auto-balancing mesh network.
-
-## Table of Contents
-- [Installation](#installation)
-- [Architecture Overview](#architecture-overview)
-- [Core Features](#core-features)
-- [Server-Side API (Coordinator)](#server-side-api-coordinator)
-- [Client-Side API (Client)](#client-side-api-client)
-- [Media Pipeline Hooks](#media-pipeline-hooks)
-- [Auto-Balancing Strategies](#auto-balancing-strategies)
 
 ---
 
-## Installation
+**`rtcTree`** is a decentralized, high-performance WebRTC topology management library engineered specifically for **Peer-to-Peer (P2P) Live Streaming distribution**.
 
-Install via npm:
+Instead of routing all video traffic through expensive media servers (SFU/MCU), `rtcTree` intelligently offloads the streamer's upload bandwidth by distributing media streams across viewers using an **Auto-Balancing Mesh Network**.
+
+## 🌟 Why rtcTree?
+* **Cost-Efficient**: Zero media server bandwidth costs. The server only handles lightweight signaling.
+* **Smart Auto-Balancing**: Periodically evaluates connection quality (Ping/Bitrate) and promotes strong nodes to the top of the tree.
+* **Self-Healing**: If a parent node drops out, the mesh automatically restructures in milliseconds.
+* **Media Pipeline Control**: Decouple and independently process video, audio, and data tracks before local rendering or downstream forwarding.
+
+---
+
+## 🏗️ Architecture & Topology
+
+`rtcTree` operates on a hybrid architecture that splits the heavy lifting from the coordination:
+
+1. **Server Coordinator (`RTCTreeCoordinator`)**: Runs on your Node.js signaling server. Maintains a structural map of the network topology and orchestrates handshakes. **It never processes or touches the actual media streams.**
+2. **Client Node (`RTCTreeClient`)**: Runs in the viewer's browser. Manages the WebRTC connections, handles the media pipeline, and acts as a relay to forward streams to downstream viewers.
+
+### The Mesh Concept
+
+```mermaid
+graph TD
+    classDef streamer fill:#ff9999,stroke:#cc0000,stroke-width:2px;
+    classDef strong fill:#99ff99,stroke:#009900,stroke-width:2px;
+    classDef viewer fill:#99ccff,stroke:#0066cc,stroke-width:2px;
+
+    S(🎥 Streamer Node):::streamer
+
+    V1(🖥️ Viewer 1<br/>Ping: 12ms):::strong
+    V2(🖥️ Viewer 2<br/>Ping: 15ms):::strong
+
+    V3(📱 Viewer 3)
+    V4(💻 Viewer 4)
+    V5(📱 Viewer 5)
+    V6(🖥️ Viewer 6)
+
+    S -->|Stream| V1
+    S -->|Stream| V2
+
+    V1 -.->|Relay| V3:::viewer
+    V1 -.->|Relay| V4:::viewer
+    V2 -.->|Relay| V5:::viewer
+    V2 -.->|Relay| V6:::viewer
+
+    style S color:#000
+    style V1 color:#000
+    style V2 color:#000
+```
+*In this topology, the streamer only uploads to a few strong "Layer 1" nodes. Those nodes automatically relay the feed to the rest of the network.*
+
+---
+
+## 🚀 Installation
+
+Install via npm or yarn:
 
 ```bash
 npm install webrtc-tree
+# or
+yarn add webrtc-tree
 ```
 
 ---
 
-## Architecture Overview
-
-`rtcTree` operates on a hybrid architecture:
-1. **Server Coordinator (`RTCTreeCoordinator`)**: Maintains a lightweight structural map of the network topology. It calculates routing, network quality, and connection assignments without ever processing or receiving the actual media streams.
-2. **Client Node (`RTCTreeClient`)**: Runs in the browser, manages the actual WebRTC `PeerJS` connections, processes media pipelines, and forwards streams to downstream viewers.
-
----
-
-## Core Features
-
-- **Media Pipeline**: Decouple and independently process video, audio, and data tracks before local rendering or downstream forwarding.
-- **Smart Auto-Balancing**: Periodically evaluates connection quality (ping/bitrate) to promote strong nodes and demote weak ones.
-- **Self-Healing Topology**: If a parent node drops, the mesh automatically restructures, placing children under the most optimal available nodes.
-- **Data Channel Broadcasting**: Send and intercept custom JSON payloads across the entire mesh hierarchy.
-
----
-
-## Server-Side API (Coordinator)
+## 💻 Server-Side API (Coordinator)
 
 The Coordinator must run in a Node.js backend environment to keep track of the mesh state.
 
@@ -64,32 +96,28 @@ coordinator.createRoom('room_123', 'streamer_id', {
 });
 ```
 
-### `getAssignedParent(roomId, peerId)`
-Retrieves the optimal parent ID for a joining or reconnecting client.
+### Advanced Signaling Setup
+To handle WebRTC handshakes seamlessly, you must hook the Coordinator into your WebSocket server:
 
 ```typescript
-const parentId = coordinator.getAssignedParent('room_123', 'viewer_id');
-```
-
-### `getTotalNodes(roomId)`
-Returns the total number of connected peers in the room.
-
-```typescript
-const count = coordinator.getTotalNodes('room_123');
-```
-
-### `onPeersNeedReconnect` (Event Callback)
-Triggered when the Coordinator's `quality` auto-balancer decides to swap nodes. You must notify these peers via your own WebSocket/SSE to force a reconnection.
-
-```typescript
-coordinator.onPeersNeedReconnect = (roomId, peerIds) => {
-  // Send WebSocket message instructing peers to disconnect and ask for a new parent
+// Define how the server forwards signaling messages
+coordinator.onSignalingMessage = (roomId, fromPeerId, toPeerId, message) => {
+  io.to(toPeerId).emit('rtc-message', {
+    fromPeerId: fromPeerId,
+    payload: message
+  });
 };
+
+// Route incoming WebSocket messages into the Coordinator
+socket.on('rtc-message', (data) => {
+  const { roomId, toPeerId, payload } = data;
+  coordinator.handleSignaling(roomId, socket.id, toPeerId, payload);
+});
 ```
 
 ---
 
-## Client-Side API (Client)
+## 🌐 Client-Side API (Client Node)
 
 The Client handles the P2P connection logic in the browser environment.
 
@@ -104,22 +132,23 @@ const client = new RTCTreeClient({
     const response = await fetch('/api/get-parent');
     return (await response.json()).parentId;
   },
-  reportDeadFn: async (deadPeerId) => {
-    // Report dropped connections to backend
+  sendMessageFn: (targetPeerId, payload) => {
+    // Forward WebRTC signals (Offer/Answer/ICE) through your WebSocket
+    socket.emit("rtc-message", { toPeerId: targetPeerId, payload });
   },
   onStreamReady: (stream) => {
-    // Attach stream to video element
+    // Attach stream to video element when connection is successful
     videoElement.srcObject = stream;
   }
 });
 
-// Start process
+// Start the WebRTC Client
 await client.initViewer();
 ```
 
 ---
 
-## Media Pipeline Hooks
+## 🎛️ Media Pipeline Hooks
 
 The pipeline allows intercepting streams at two specific stages: `Incoming` (for local display) and `Outgoing` (for forwarding). 
 
@@ -132,7 +161,7 @@ const client = new RTCTreeClient({
   // 1. INCOMING: Modify what the local user sees/hears
   onIncomingVideo: (track) => applyLocalFilter(track),
   onIncomingAudio: (track) => {
-    track.enabled = false; // Mute locally
+    track.enabled = false; // Example: Mute locally
     return track;
   },
   onIncomingData: (data) => console.log('Chat message:', data),
@@ -148,20 +177,21 @@ const client = new RTCTreeClient({
 
 ---
 
-## Auto-Balancing Strategies
+## ⚖️ Auto-Balancing Strategies
 
 Define the strategy in the `RoomConfig` during `createRoom`.
 
 ### 1. `chronological` (Default)
-- **Placement**: First-come, first-serve. Nodes fill layers sequentially via BFS.
+- **Placement**: First-come, first-serve. Nodes fill layers sequentially via BFS (Breadth-First Search).
 - **Healing**: If a node disconnects, a child or a newly joining node takes its place sequentially.
 
-### 2. `quality`
+### 2. `quality` (Advanced)
 - **Active Evaluation**: Periodically checks the Ping and Bitrate of all nodes.
-- **Node Swapping**: If a downstream node exhibits significantly better network quality than an upstream node, the server swaps their positions.
+- **Node Swapping**: If a downstream node exhibits significantly better network quality than an upstream node, the server swaps their positions automatically.
 - **Smart Promotion**: When a node disconnects, the coordinator evaluates its children and immediately promotes the child with the best network score to assume the vacant position.
 
 ---
 
-## License
-MIT License
+## 📜 License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
