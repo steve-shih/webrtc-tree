@@ -10,9 +10,9 @@
 
 ---
 
-**`rtcTree`** is a decentralized, high-performance WebRTC topology management library engineered specifically for **Peer-to-Peer (P2P) Live Streaming distribution**.
+**`webrtc-tree`** is a decentralized, high-performance WebRTC topology management library engineered specifically for **Peer-to-Peer (P2P) Live Streaming** and **Video Broadcasting**. 
 
-Instead of routing all video traffic through expensive media servers (SFU/MCU), `rtcTree` intelligently offloads the streamer's upload bandwidth by distributing media streams across viewers using an **Auto-Balancing Mesh Network**.
+By utilizing an **Auto-Balancing WebRTC Mesh Network**, `webrtc-tree` intelligently offloads the streamer's upload bandwidth by distributing media streams across viewers. It is the perfect solution for building scalable, zero-cost live streaming platforms using Node.js and WebRTC.
 
 ## 🌟 Why rtcTree?
 * **Cost-Efficient**: Zero media server bandwidth costs. The server only handles lightweight signaling.

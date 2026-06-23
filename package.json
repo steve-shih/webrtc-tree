@@ -35,10 +35,16 @@
     "webrtc",
     "mesh",
     "p2p",
+    "peer-to-peer",
     "live",
     "streaming",
+    "video-streaming",
+    "broadcast",
     "tree",
-    "auto-balancing"
+    "auto-balancing",
+    "topology",
+    "signaling",
+    "webrtc-mesh"
   ],
   "author": "",
   "license": "ISC",
